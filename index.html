@@ -1,0 +1,1012 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Door to Door — Kashmir Valley Transit, Uber H3 Spatial Map & Safe Travel Shield</title>
+  
+  <!-- Separated Production CSS -->
+  <link rel="stylesheet" href="/static/css/style.css">
+  
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <!-- Leaflet CSS & JS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  
+  <!-- Google Identity Services (Google Sign-In) -->
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  
+  <!-- React & Babel -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    const API_BASE = window.location.port === "3000" ? "http://127.0.0.1:8000" : "";
+
+    const TRANSPORT_MODES = [
+      { id: "two_wheeler", label: "Two Wheeler", desc: "Scooter / Royal Enfield", icon: "🏍️", badge: "Agile & Fast" },
+      { id: "car", label: "Car (Sedan/Hatch)", desc: "Swift / Etios (1-4 pax)", icon: "🚗", badge: "Standard" },
+      { id: "xl_car", label: "XL Car (4x4 SUV)", desc: "Innova / Scorpio / 4x4", icon: "🚙", badge: "Mountain Ready" },
+      { id: "bus", label: "Bus / Coach", desc: "JKSRTC E-Bus & Coaches", icon: "🚌", badge: "Eco / Budget" }
+    ];
+
+    const MAP_LAYERS = {
+      streets: {
+        name: "Roads & Streets (OSM)",
+        url: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+        attrib: '&copy; OpenStreetMap contributors'
+      },
+      voyager: {
+        name: "CartoDB Detailed",
+        url: "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png",
+        attrib: '&copy; CARTO | OSM'
+      },
+      topo: {
+        name: "Topography / Mountains",
+        url: "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
+        attrib: '&copy; OpenTopoMap'
+      }
+    };
+
+    function App() {
+      // User & Authentication State
+      const [currentUser, setCurrentUser] = useState(null);
+      const [authToken, setAuthToken] = useState(localStorage.getItem("d2d_token") || "");
+      const [showLoginModal, setShowLoginModal] = useState(false);
+
+      // Locations & Routing
+      const [locations, setLocations] = useState([]);
+      const [originId, setOriginId] = useState("srinagar_airport");
+      const [destId, setDestId] = useState("gulmarg");
+      const [selectedMode, setSelectedMode] = useState("car");
+      
+      // H3 Core Neighbor Grid
+      const [showNeighbors, setShowNeighbors] = useState(true);
+      const [neighborRing, setNeighborRing] = useState(1);
+      const [neighborData, setNeighborData] = useState(null);
+      const [mapStyle, setMapStyle] = useState("voyager");
+
+      // Route Calculations & Live Vehicle Tracing
+      const [routeData, setRouteData] = useState(null);
+      const [isTracing, setIsTracing] = useState(false);
+      const [traceProgress, setTraceProgress] = useState(0);
+      const [traceStatus, setTraceStatus] = useState("");
+
+      // Arrival Brief & Room Bookings
+      const [arrivalBrief, setArrivalBrief] = useState(null);
+      const [bookingModal, setBookingModal] = useState(null);
+      const [bookingForm, setBookingForm] = useState({ name: "Tawheeda Jan", phone: "+91 94190 12345", date: "2026-11-12", nights: 2 });
+      const [bookingSuccess, setBookingSuccess] = useState(null);
+
+      // Map references
+      const mapRef = useRef(null);
+      const tileLayerRef = useRef(null);
+      const markersLayerRef = useRef(null);
+      const hexLayerRef = useRef(null);
+      const neighborHexLayerRef = useRef(null);
+      const routePolylineRef = useRef(null);
+      const vehicleMarkerRef = useRef(null);
+
+      // Handle Google SSO Token
+      const handleGoogleCallback = async (response) => {
+        try {
+          const res = await fetch(`${API_BASE}/api/v1/auth/google`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ id_token: response.credential })
+          });
+          const data = await res.json();
+          if (data.access_token) {
+            setAuthToken(data.access_token);
+            localStorage.setItem("d2d_token", data.access_token);
+            setCurrentUser(data.user);
+            setShowLoginModal(false);
+          }
+        } catch (err) {
+          console.error("Google Auth Error:", err);
+        }
+      };
+
+      // Mock Google SSO (Sandbox for instant local testing without Google Client ID setup)
+      const handleMockGoogleLogin = async (mockEmail) => {
+        try {
+          const res = await fetch(`${API_BASE}/api/v1/auth/google`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ id_token: `mock_google_${mockEmail}` })
+          });
+          const data = await res.json();
+          if (data.access_token) {
+            setAuthToken(data.access_token);
+            localStorage.setItem("d2d_token", data.access_token);
+            setCurrentUser(data.user);
+            setShowLoginModal(false);
+          }
+        } catch (err) {
+          alert("Login error: " + err);
+        }
+      };
+
+      const handleLogout = () => {
+        setAuthToken("");
+        localStorage.removeItem("d2d_token");
+        setCurrentUser(null);
+      };
+
+      // Verify stored auth token on load
+      useEffect(() => {
+        if (authToken) {
+          fetch(`${API_BASE}/api/v1/auth/me`, {
+            headers: { "Authorization": `Bearer ${authToken}` }
+          })
+          .then(res => res.ok ? res.json() : null)
+          .then(u => {
+            if (u) setCurrentUser(u);
+            else handleLogout();
+          })
+          .catch(() => handleLogout());
+        }
+      }, [authToken]);
+
+      // Initialize Google Identity Services One Tap / Button
+      useEffect(() => {
+        if (window.google?.accounts?.id) {
+          window.google.accounts.id.initialize({
+            client_id: "407408718192.apps.googleusercontent.com",
+            callback: handleGoogleCallback,
+            auto_select: false
+          });
+          const btnDiv = document.getElementById("google-signin-btn");
+          if (btnDiv) {
+            window.google.accounts.id.renderButton(btnDiv, {
+              theme: "filled_blue",
+              size: "large",
+              text: "continue_with",
+              shape: "pill"
+            });
+          }
+        }
+      }, [showLoginModal]);
+
+      // Fetch Locations & Arrival Brief on mount
+      useEffect(() => {
+        fetch(`${API_BASE}/api/v1/transit/locations`)
+          .then(res => res.json())
+          .then(data => setLocations(data))
+          .catch(err => console.error("Error fetching locations:", err));
+
+        fetch(`${API_BASE}/api/v1/concierge/arrival-brief`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            airport_code: "SXR",
+            flight_number: "6E-554",
+            destination_area: "Dal Lake / Boulevard Road"
+          })
+        })
+        .then(res => res.json())
+        .then(data => setArrivalBrief(data))
+        .catch(err => console.error(err));
+      }, []);
+
+      // Initialize Leaflet Map
+      useEffect(() => {
+        if (!mapRef.current && document.getElementById("map-container")) {
+          const map = L.map("map-container", {
+            center: [34.0200, 74.7500],
+            zoom: 10,
+            zoomControl: true
+          });
+
+          const currentLayerConfig = MAP_LAYERS[mapStyle];
+          tileLayerRef.current = L.tileLayer(currentLayerConfig.url, {
+            attribution: currentLayerConfig.attrib,
+            maxZoom: 18
+          }).addTo(map);
+
+          neighborHexLayerRef.current = L.layerGroup().addTo(map);
+          hexLayerRef.current = L.layerGroup().addTo(map);
+          markersLayerRef.current = L.layerGroup().addTo(map);
+
+          mapRef.current = map;
+        }
+      }, []);
+
+      // Map Basemap Switcher
+      useEffect(() => {
+        if (!mapRef.current || !tileLayerRef.current) return;
+        const currentLayerConfig = MAP_LAYERS[mapStyle];
+        mapRef.current.removeLayer(tileLayerRef.current);
+        tileLayerRef.current = L.tileLayer(currentLayerConfig.url, {
+          attribution: currentLayerConfig.attrib,
+          maxZoom: 18
+        }).addTo(mapRef.current);
+      }, [mapStyle]);
+
+      // Fetch Neighbor Hexagons
+      const fetchNeighborHexagons = async (targetId, ringK) => {
+        try {
+          const res = await fetch(`${API_BASE}/api/v1/transit/neighbors`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              location_id: targetId,
+              ring_size: ringK
+            })
+          });
+          const data = await res.json();
+          setNeighborData(data);
+
+          if (neighborHexLayerRef.current) {
+            neighborHexLayerRef.current.clearLayers();
+            if (showNeighbors && data.cells) {
+              data.cells.forEach(c => {
+                const isCenter = c.is_center;
+                const hexPoly = L.polygon(c.boundary, {
+                  color: isCenter ? "#10b981" : "#06b6d4",
+                  weight: isCenter ? 2.5 : 1.2,
+                  fillColor: isCenter ? "#10b981" : "#0891b2",
+                  fillOpacity: isCenter ? 0.3 : 0.12,
+                  dashArray: isCenter ? null : "3, 4"
+                });
+                hexPoly.bindTooltip(`
+                  <div style="font-size: 11px;">
+                    <b style="color: ${isCenter ? '#34d399' : '#38bdf8'}">${c.zone_name}</b><br/>
+                    <b>H3 Cell:</b> <code style="color: #cbd5e1;">${c.h3_cell}</code><br/>
+                    <b>Ring Distance k:</b> ${c.ring_distance}<br/>
+                    <b>Center:</b> [${c.center_lat.toFixed(4)}, ${c.center_lng.toFixed(4)}]
+                  </div>
+                `, { sticky: true });
+                neighborHexLayerRef.current.addLayer(hexPoly);
+              });
+            }
+          }
+        } catch (err) {
+          console.error("Failed to load neighboring hexagons:", err);
+        }
+      };
+
+      useEffect(() => {
+        if (destId) {
+          fetchNeighborHexagons(destId, neighborRing);
+        }
+      }, [destId, neighborRing, showNeighbors]);
+
+      // Render Map Locations & Pins
+      useEffect(() => {
+        if (!mapRef.current || locations.length === 0) return;
+
+        markersLayerRef.current.clearLayers();
+        hexLayerRef.current.clearLayers();
+
+        locations.forEach(loc => {
+          const isOrigin = loc.id === originId;
+          const isDest = loc.id === destId;
+
+          if (loc.cell_boundary && loc.cell_boundary.length > 0) {
+            const hexPolygon = L.polygon(loc.cell_boundary, {
+              color: isOrigin ? "#10b981" : (isDest ? "#f59e0b" : "#6366f1"),
+              weight: isOrigin || isDest ? 3 : 1.5,
+              fillColor: isOrigin ? "#10b981" : (isDest ? "#f59e0b" : "#818cf8"),
+              fillOpacity: isOrigin || isDest ? 0.35 : 0.14,
+              dashArray: isOrigin || isDest ? null : "4, 4"
+            });
+            hexPolygon.bindTooltip(`<b>H3 Cell:</b> ${loc.h3_cell}<br/><b>${loc.name}</b>`, { sticky: true });
+            hexPolygon.on('click', () => setDestId(loc.id));
+            hexLayerRef.current.addLayer(hexPolygon);
+          }
+
+          const markerHtml = `
+            <div style="background: ${isOrigin ? '#10b981' : (isDest ? '#f59e0b' : '#1e293b')}; color: white; border: 2px solid ${isOrigin ? '#34d399' : (isDest ? '#fbbf24' : '#64748b')}; padding: 4px 8px; border-radius: 12px; font-size: 11px; font-weight: bold; white-space: nowrap; box-shadow: 0 4px 12px rgba(0,0,0,0.5); cursor: pointer; display: flex; align-items: center; gap: 4px;">
+              <span>${isOrigin ? '🛫' : (isDest ? '🎯' : '📍')}</span>
+              <span>${loc.name.split('(')[0].trim()}</span>
+            </div>
+          `;
+
+          const customIcon = L.divIcon({
+            html: markerHtml,
+            className: 'custom-map-pin',
+            iconSize: [120, 28],
+            iconAnchor: [60, 14]
+          });
+
+          const marker = L.marker([loc.lat, loc.lng], { icon: customIcon });
+          marker.bindPopup(`
+            <div style="font-family: inherit;">
+              <div style="font-size: 10px; color: #38bdf8; font-weight: 700; text-transform: uppercase;">${loc.category}</div>
+              <div style="font-size: 15px; font-weight: 800; margin: 2px 0 6px 0;">${loc.name}</div>
+              <div style="font-size: 12px; color: #cbd5e1; margin-bottom: 8px;">${loc.description}</div>
+              <div style="font-size: 11px; color: #94a3b8; background: #1e293b; padding: 6px; border-radius: 6px; margin-bottom: 8px;">
+                <b>Uber H3 Cell:</b> <code style="color: #a78bfa;">${loc.h3_cell}</code><br/>
+                <b>Key Sights:</b> ${loc.highlights}
+              </div>
+              <div style="display: flex; gap: 6px;">
+                <button onclick="window.selectAsOrigin('${loc.id}')" style="background: #10b981; color: #022c22; font-weight: bold; font-size: 11px; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer;">Set as Origin</button>
+                <button onclick="window.selectAsDest('${loc.id}')" style="background: #f59e0b; color: #451a03; font-weight: bold; font-size: 11px; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer;">Set Destination</button>
+              </div>
+            </div>
+          `);
+          markersLayerRef.current.addLayer(marker);
+        });
+
+      }, [locations, originId, destId]);
+
+      useEffect(() => {
+        window.selectAsOrigin = (id) => setOriginId(id);
+        window.selectAsDest = (id) => setDestId(id);
+      }, []);
+
+      // Calculate Route via Backend API
+      const calculateRoute = async () => {
+        if (!originId || !destId) return;
+        try {
+          const res = await fetch(`${API_BASE}/api/v1/transit/calculate-route`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              origin_id: originId,
+              destination_id: destId,
+              transport_mode: selectedMode
+            })
+          });
+          const data = await res.json();
+          setRouteData(data);
+
+          if (mapRef.current && data.path) {
+            if (routePolylineRef.current) {
+              mapRef.current.removeLayer(routePolylineRef.current);
+            }
+
+            const polyline = L.polyline(data.path, {
+              color: "#38bdf8",
+              weight: 5,
+              opacity: 0.85,
+              dashArray: "1, 8"
+            }).addTo(mapRef.current);
+
+            routePolylineRef.current = polyline;
+            mapRef.current.fitBounds(polyline.getBounds(), { padding: [50, 50] });
+
+            if (data.h3_polygons) {
+              data.h3_polygons.forEach(hp => {
+                const hPoly = L.polygon(hp.boundary, {
+                  color: "#a855f7",
+                  weight: 1.5,
+                  fillColor: "#c084fc",
+                  fillOpacity: 0.15,
+                  dashArray: "3, 3"
+                });
+                hPoly.bindTooltip(`Traversing H3 Cell: ${hp.h3_cell}`, { sticky: true });
+                hexLayerRef.current.addLayer(hPoly);
+              });
+            }
+          }
+        } catch (err) {
+          console.error("Failed to calculate route:", err);
+        }
+      };
+
+      useEffect(() => {
+        calculateRoute();
+      }, [originId, destId, selectedMode]);
+
+      // Live Tracing Simulation
+      const startLiveTracing = async () => {
+        if (isTracing) return;
+        setIsTracing(true);
+        setTraceProgress(0);
+        setTraceStatus("Initiating live telemetry stream...");
+
+        try {
+          const res = await fetch(`${API_BASE}/api/v1/transit/live-trace`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              origin_id: originId,
+              destination_id: destId,
+              transport_mode: selectedMode
+            })
+          });
+          const { steps } = await res.json();
+
+          let currentStep = 0;
+          const interval = setInterval(() => {
+            if (currentStep >= steps.length) {
+              clearInterval(interval);
+              setIsTracing(false);
+              setTraceStatus("Completed touchdown at destination!");
+              return;
+            }
+
+            const step = steps[currentStep];
+            setTraceProgress(step.progress_percentage);
+            setTraceStatus(step.status_message);
+
+            if (mapRef.current) {
+              if (vehicleMarkerRef.current) {
+                mapRef.current.removeLayer(vehicleMarkerRef.current);
+              }
+
+              const vehicleIconHtml = `
+                <div style="position: relative; width: 44px; height: 44px; display: flex; items-center; justify-content: center;">
+                  <div class="vehicle-pulse" style="position: absolute; width: 100%; height: 100%; border-radius: 50%; background: #38bdf8;"></div>
+                  <div style="position: relative; z-index: 2; width: 34px; height: 34px; background: #0f172a; border: 2px solid #38bdf8; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 18px; box-shadow: 0 0 15px #38bdf8;">
+                    ${selectedMode === 'two_wheeler' ? '🏍️' : (selectedMode === 'car' ? '🚗' : (selectedMode === 'xl_car' ? '🚙' : '🚌'))}
+                  </div>
+                </div>
+              `;
+
+              const vIcon = L.divIcon({
+                html: vehicleIconHtml,
+                className: 'live-vehicle-marker',
+                iconSize: [44, 44],
+                iconAnchor: [22, 22]
+              });
+
+              vehicleMarkerRef.current = L.marker([step.lat, step.lng], { icon: vIcon }).addTo(mapRef.current);
+              mapRef.current.panTo([step.lat, step.lng], { animate: true, duration: 0.3 });
+            }
+
+            currentStep++;
+          }, 350);
+
+        } catch (err) {
+          console.error("Live tracing error:", err);
+          setIsTracing(false);
+        }
+      };
+
+      // Handle Room Booking
+      const handleBook = async (e) => {
+        e.preventDefault();
+        try {
+          const headers = { "Content-Type": "application/json" };
+          if (authToken) headers["Authorization"] = `Bearer ${authToken}`;
+
+          const res = await fetch(`${API_BASE}/api/v1/bookings/rooms`, {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              hotel_id: bookingModal.id,
+              guest_name: currentUser ? currentUser.name : bookingForm.name,
+              guest_phone: bookingForm.phone,
+              check_in: bookingForm.date,
+              nights: parseInt(bookingForm.nights)
+            })
+          });
+          const json = await res.json();
+          setBookingSuccess(json);
+          setBookingModal(null);
+        } catch (err) {
+          alert("Booking error: " + err);
+        }
+      };
+
+      const selectedOption = routeData?.options?.find(o => o.mode === selectedMode) || routeData?.options?.[0];
+
+      return (
+        <div className="pb-24">
+          
+          {/* Top Bar with Google SSO Profile */}
+          <header className="border-b border-slate-800 bg-slate-900/90 backdrop-blur-md sticky top-0 z-50 px-6 py-4 flex flex-wrap justify-between items-center">
+            <div className="flex items-center space-x-3">
+              <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-emerald-500 to-teal-400 flex items-center justify-center font-black text-slate-950 text-xl shadow-lg shadow-emerald-500/20">
+                D2D
+              </div>
+              <div>
+                <h1 className="text-xl font-extrabold tracking-tight text-white flex items-center gap-2">
+                  Door to Door <span className="text-xs px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">Microservices Grid</span>
+                </h1>
+                <p className="text-xs text-slate-400">FastAPI API Gateway • Redis Cache • gRPC • Uber H3 Core</p>
+              </div>
+            </div>
+
+            {/* Auth Profile / Login Button */}
+            <div className="flex items-center gap-3 mt-2 sm:mt-0">
+              {currentUser ? (
+                <div className="flex items-center gap-2 bg-slate-800/90 border border-slate-700 px-3 py-1.5 rounded-xl">
+                  {currentUser.picture ? (
+                    <img src={currentUser.picture} className="w-6 h-6 rounded-full border border-emerald-400" />
+                  ) : (
+                    <span className="w-6 h-6 rounded-full bg-emerald-600 text-xs flex items-center justify-center font-bold">
+                      {currentUser.name.charAt(0)}
+                    </span>
+                  )}
+                  <div className="text-xs">
+                    <span className="font-bold text-white block">{currentUser.name}</span>
+                    <span className="text-[10px] text-emerald-400 font-mono">Google Verified</span>
+                  </div>
+                  <button 
+                    onClick={handleLogout} 
+                    className="ml-2 text-[10px] px-2 py-0.5 rounded bg-slate-700 text-slate-300 hover:bg-rose-900/60 hover:text-rose-300 transition-all"
+                  >
+                    Logout
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => setShowLoginModal(true)}
+                  className="google-btn text-xs"
+                >
+                  <svg className="w-4 h-4" viewBox="0 0 24 24">
+                    <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                    <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                    <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
+                    <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
+                  </svg>
+                  <span>Sign in with Google</span>
+                </button>
+              )}
+            </div>
+          </header>
+
+          <main className="max-w-7xl mx-auto px-4 sm:px-6 mt-6">
+            
+            {/* Live Interactive Map and Route Control */}
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+              
+              {/* Map Panel (7 cols) */}
+              <div className="lg:col-span-7 bg-slate-900/80 border border-slate-800 rounded-2xl p-4 shadow-2xl relative">
+                
+                {/* Map Toolbar */}
+                <div className="flex flex-wrap items-center justify-between pb-3 border-b border-slate-800 mb-3 gap-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-base font-bold text-white flex items-center gap-1.5">
+                      🗺️ Kashmir Valley Map & Roads
+                    </span>
+                    <span className="text-xs bg-slate-800 px-2 py-0.5 rounded text-slate-400 border border-slate-700">
+                      12 Verified Hubs
+                    </span>
+                  </div>
+
+                  {/* Basemap & Neighbor Controls */}
+                  <div className="flex items-center gap-2">
+                    <div className="flex items-center bg-slate-950 rounded-lg p-0.5 border border-slate-800 text-xs">
+                      {Object.keys(MAP_LAYERS).map(k => (
+                        <button
+                          key={k}
+                          onClick={() => setMapStyle(k)}
+                          className={`px-2 py-1 rounded-md transition-all ${
+                            mapStyle === k ? 'bg-slate-800 text-emerald-400 font-bold' : 'text-slate-400 hover:text-white'
+                          }`}
+                        >
+                          {k === 'streets' ? '🛣️ Roads' : (k === 'voyager' ? '🧭 Detailed' : '⛰️ Topo')}
+                        </button>
+                      ))}
+                    </div>
+
+                    <button
+                      onClick={() => setShowNeighbors(!showNeighbors)}
+                      className={`text-xs px-2.5 py-1 rounded-lg border transition-all ${
+                        showNeighbors 
+                          ? 'bg-cyan-950/80 border-cyan-500/50 text-cyan-300 font-bold' 
+                          : 'bg-slate-950 border-slate-800 text-slate-500'
+                      }`}
+                    >
+                      ⬡ Neighbors ({neighborRing === 1 ? 'k=1 (6)' : 'k=2 (18)'})
+                    </button>
+
+                    <button
+                      onClick={() => setNeighborRing(neighborRing === 1 ? 2 : 1)}
+                      className="text-xs px-2 py-1 rounded-lg bg-slate-950 border border-slate-800 text-slate-300 hover:border-slate-700"
+                    >
+                      {neighborRing === 1 ? 'Ring: +1' : 'Ring: -1'}
+                    </button>
+                  </div>
+                </div>
+
+                <div id="map-container" className="shadow-inner border border-slate-800"></div>
+
+                {neighborData && showNeighbors && (
+                  <div className="mt-2.5 px-3 py-1.5 rounded-lg bg-cyan-950/40 border border-cyan-800/40 text-xs text-cyan-300 flex items-center justify-between">
+                    <span>
+                      <b>H3 Core gridDisk:</b> Displaying <b>{neighborData.total_hexagons} hexagonal cells</b> around target (res 7, k={neighborRing})
+                    </span>
+                    <span className="font-mono text-[11px] text-cyan-400">
+                      Center Cell: {neighborData.center_h3_cell}
+                    </span>
+                  </div>
+                )}
+
+                {isTracing && (
+                  <div className="mt-3 p-3 rounded-xl bg-slate-800/90 border border-cyan-500/40 flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <span className="text-xl animate-spin">🧭</span>
+                      <div>
+                        <div className="text-xs font-bold text-cyan-400 uppercase tracking-wider">Live Vehicle Tracing via gRPC Stream</div>
+                        <div className="text-sm text-slate-200">{traceStatus}</div>
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <span className="text-base font-extrabold text-cyan-300 font-mono">{traceProgress}%</span>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Dispatcher Panel (5 cols) */}
+              <div className="lg:col-span-5 space-y-4">
+                
+                <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl">
+                  <h2 className="text-sm font-bold text-slate-200 uppercase tracking-wider mb-4 flex items-center gap-2">
+                    <span>⚡</span> gRPC Route Dispatcher (Cached with Redis)
+                  </h2>
+
+                  <div className="space-y-3">
+                    <div>
+                      <label className="text-xs text-slate-400 font-semibold mb-1 block">Pick Origin Hub</label>
+                      <select 
+                        value={originId} 
+                        onChange={(e) => setOriginId(e.target.value)}
+                        className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500"
+                      >
+                        {locations.map(loc => (
+                          <option key={'orig-' + loc.id} value={loc.id}>
+                            🛫 {loc.name} ({loc.category})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="text-xs text-slate-400 font-semibold mb-1 block">Pick Destination (Tourist Spot)</label>
+                      <select 
+                        value={destId} 
+                        onChange={(e) => setDestId(e.target.value)}
+                        className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-amber-500"
+                      >
+                        {locations.map(loc => (
+                          <option key={'dest-' + loc.id} value={loc.id}>
+                            🎯 {loc.name} ({loc.category})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  {/* Mode Selector Buttons */}
+                  <div className="mt-4">
+                    <label className="text-xs text-slate-400 font-semibold mb-2 block">Choose Transport Mode</label>
+                    <div className="grid grid-cols-2 gap-2">
+                      {TRANSPORT_MODES.map(mode => (
+                        <button
+                          key={mode.id}
+                          onClick={() => setSelectedMode(mode.id)}
+                          className={`p-3 rounded-xl border text-left transition-all ${
+                            selectedMode === mode.id 
+                              ? 'bg-emerald-950/40 border-emerald-500 text-white shadow-lg shadow-emerald-950/50' 
+                              : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700 hover:text-slate-200'
+                          }`}
+                        >
+                          <div className="flex justify-between items-center">
+                            <span className="text-xl">{mode.icon}</span>
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 font-mono">{mode.badge}</span>
+                          </div>
+                          <div className="text-xs font-bold mt-1.5">{mode.label}</div>
+                          <div className="text-[11px] text-slate-400 truncate">{mode.desc}</div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Route Summary */}
+                  {routeData && (
+                    <div className="mt-5 p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-3">
+                      <div className="flex justify-between items-baseline">
+                        <div>
+                          <div className="text-xs text-slate-400">Total Road Distance</div>
+                          <div className="text-2xl font-black text-white font-mono">{routeData.distance_km} <span className="text-sm font-normal text-slate-400">km</span></div>
+                        </div>
+                        <div className="text-right">
+                          <div className="text-xs text-slate-400">Regulated Fair Fare</div>
+                          <div className="text-2xl font-black text-emerald-400 font-mono">
+                            ₹{selectedOption?.fare_min} - ₹{selectedOption?.fare_max}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2 pt-2 border-t border-slate-800 text-xs">
+                        <div>
+                          <span className="text-slate-500 block">Est. Duration</span>
+                          <span className="font-bold text-slate-200">⏱️ ~{selectedOption?.duration_minutes} mins</span>
+                        </div>
+                        <div>
+                          <span className="text-slate-500 block">Uber H3 Hex Traversed</span>
+                          <span className="font-bold text-purple-400 font-mono">⬡ {routeData.h3_hexagons?.length || 0} cells</span>
+                        </div>
+                      </div>
+
+                      <div className="p-2.5 rounded-lg bg-slate-900 border border-slate-800 text-xs">
+                        <div className="text-amber-400 font-semibold mb-0.5">💡 Driver Recommendation:</div>
+                        <div className="text-slate-300">{selectedOption?.recommendation}</div>
+                        <div className="text-slate-400 mt-1 text-[11px]"><b className="text-slate-300">Safety Tip:</b> {selectedOption?.safety_tip}</div>
+                      </div>
+
+                      <button
+                        onClick={startLiveTracing}
+                        disabled={isTracing}
+                        className={`w-full py-3 px-4 rounded-xl font-bold text-sm flex items-center justify-center gap-2 shadow-lg transition-all ${
+                          isTracing 
+                            ? 'bg-slate-800 text-slate-500 cursor-not-allowed' 
+                            : 'bg-gradient-to-r from-emerald-500 to-teal-400 text-slate-950 hover:brightness-110 shadow-emerald-500/20'
+                        }`}
+                      >
+                        <span>{isTracing ? '🛰️' : '🚀'}</span>
+                        <span>{isTracing ? 'Live Telemetry Active...' : `Trace Route Live (${selectedMode.replace('_', ' ').toUpperCase()})`}</span>
+                      </button>
+                    </div>
+                  )}
+
+                </div>
+
+                {/* Quick Location Pills */}
+                <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+                  <div className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Explore Popular Kashmir Spots</div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {locations.map(loc => (
+                      <button
+                        key={'pill-' + loc.id}
+                        onClick={() => setDestId(loc.id)}
+                        className={`text-xs px-2.5 py-1 rounded-lg border transition-all ${
+                          destId === loc.id 
+                            ? 'bg-amber-500/20 border-amber-500/50 text-amber-300 font-semibold' 
+                            : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700 hover:text-slate-200'
+                        }`}
+                      >
+                        {loc.name.split('(')[0]}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+              </div>
+
+            </div>
+
+            {/* Anti-Fraud Advisories */}
+            {arrivalBrief?.anti_fraud_advisories && (
+              <div className="mt-10">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-lg font-extrabold text-white flex items-center gap-2">
+                    🛡️ Official Anti-Fraud Advisories & Tout Shield
+                  </h3>
+                  <span className="text-xs text-emerald-400 bg-emerald-950/50 border border-emerald-800 px-3 py-1 rounded-full font-semibold">
+                    Saved Tourists Over {arrivalBrief.potential_fraud_savings}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  {arrivalBrief.anti_fraud_advisories.map((rule, idx) => (
+                    <div key={'rule-' + idx} className="bg-slate-900 border border-slate-800 rounded-2xl p-5 hover:border-slate-700 transition-all flex flex-col justify-between">
+                      <div>
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="text-xs font-bold px-2 py-0.5 rounded bg-rose-500/10 text-rose-400 border border-rose-500/30 uppercase">
+                            Warning
+                          </span>
+                          <span className="text-[11px] text-slate-400 font-mono">Verified Police Rule</span>
+                        </div>
+                        <h4 className="font-bold text-white text-sm mb-2">{rule.scam_title}</h4>
+                        <p className="text-xs text-slate-400 mb-3">{rule.description}</p>
+                        <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 text-xs text-slate-300 mb-4">
+                          <b className="text-emerald-400">Official Safe Protocol:</b> {rule.prevention_guide}
+                        </div>
+                      </div>
+                      <div className="text-[11px] text-slate-400 flex items-center justify-between pt-3 border-t border-slate-800/80">
+                        <span>Helpline:</span>
+                        <span className="text-emerald-400 font-bold">{rule.official_helpline}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Curated Pre-Verified Stays */}
+            {arrivalBrief?.recommended_hotels && (
+              <div className="mt-10">
+                <h3 className="text-lg font-extrabold text-white mb-4 flex items-center gap-2">
+                  🏨 Pre-Verified Safe Stays & Houseboats (Direct Front Desk Sync)
+                </h3>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                  {arrivalBrief.recommended_hotels.map(hotel => (
+                    <div key={'hotel-' + hotel.id} className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden hover:border-slate-700 transition-all flex flex-col justify-between">
+                      <div className="h-40 overflow-hidden relative">
+                        <img src={hotel.image_url} alt={hotel.name} className="w-full h-full object-cover hover:scale-105 transition-all duration-300" />
+                        <span className="absolute top-2 right-2 text-xs font-bold bg-slate-900/90 text-amber-400 px-2 py-0.5 rounded-full border border-slate-700">
+                          ★ {hotel.rating}
+                        </span>
+                      </div>
+                      <div className="p-4 flex-1 flex flex-col justify-between">
+                        <div>
+                          <div className="text-[10px] uppercase font-bold text-emerald-400 tracking-wider mb-1">{hotel.category}</div>
+                          <h4 className="font-bold text-white text-sm mb-1">{hotel.name}</h4>
+                          <p className="text-xs text-slate-400 mb-2 truncate">{hotel.locality}</p>
+                          <p className="text-[11px] text-slate-500 line-clamp-2 mb-3">{hotel.amenities}</p>
+                        </div>
+                        <div>
+                          <div className="flex items-baseline justify-between pt-2 border-t border-slate-800 mb-3">
+                            <span className="text-xs text-slate-400">Per Night</span>
+                            <span className="text-base font-extrabold text-white font-mono">₹{hotel.price_per_night.toLocaleString()}</span>
+                          </div>
+                          <button
+                            onClick={() => setBookingModal(hotel)}
+                            className="w-full py-2 rounded-xl bg-slate-800 hover:bg-emerald-600 hover:text-white text-emerald-400 font-bold text-xs transition-all border border-emerald-500/30"
+                          >
+                            Book Verified Room
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+          </main>
+
+          {/* Google SSO Login Modal */}
+          {showLoginModal && (
+            <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+              <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-sm w-full p-6 shadow-2xl relative text-center">
+                <button 
+                  onClick={() => setShowLoginModal(false)}
+                  className="absolute top-4 right-4 text-slate-400 hover:text-white text-lg font-bold"
+                >
+                  ✕
+                </button>
+                <div className="w-12 h-12 rounded-xl bg-gradient-to-tr from-emerald-500 to-teal-400 flex items-center justify-center font-black text-slate-950 text-xl mx-auto mb-3">
+                  D2D
+                </div>
+                <h3 className="text-lg font-extrabold text-white mb-1">Sign in to Door-to-Door</h3>
+                <p className="text-xs text-slate-400 mb-6">Log in or create your verified tourist account via Google SSO</p>
+
+                {/* Google Sign-in Official GSI Button */}
+                <div id="google-signin-btn" className="flex justify-center mb-4"></div>
+
+                <div className="relative my-4">
+                  <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-slate-800"></div></div>
+                  <div className="relative flex justify-center text-xs uppercase"><span className="bg-slate-900 px-2 text-slate-500 font-semibold">Or Quick Demo Sandbox</span></div>
+                </div>
+
+                {/* Instant Demo Sandbox Sign-in */}
+                <div className="space-y-2">
+                  <button
+                    onClick={() => handleMockGoogleLogin("owais.traveler")}
+                    className="w-full py-2.5 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs flex items-center justify-center gap-2 border border-slate-700"
+                  >
+                    <span>👤</span> Continue as Owais Khan (Tourist)
+                  </button>
+                  <button
+                    onClick={() => handleMockGoogleLogin("kashmir.admin")}
+                    className="w-full py-2.5 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs flex items-center justify-center gap-2 border border-slate-700"
+                  >
+                    <span>🛡️</span> Continue as Kashmir Admin / DBA
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Booking Modal */}
+          {bookingModal && (
+            <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+              <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-md w-full p-6 shadow-2xl relative">
+                <button 
+                  onClick={() => setBookingModal(null)}
+                  className="absolute top-4 right-4 text-slate-400 hover:text-white text-lg font-bold"
+                >
+                  ✕
+                </button>
+                <div className="text-xs text-emerald-400 font-bold uppercase tracking-wider mb-1">Direct Verification Booking</div>
+                <h3 className="text-lg font-black text-white mb-2">{bookingModal.name}</h3>
+                <p className="text-xs text-slate-400 mb-4">{bookingModal.locality}</p>
+
+                <form onSubmit={handleBook} className="space-y-3">
+                  <div>
+                    <label className="text-xs text-slate-400 font-semibold mb-1 block">Full Name</label>
+                    <input 
+                      type="text" 
+                      required
+                      value={currentUser ? currentUser.name : bookingForm.name} 
+                      onChange={e => setBookingForm({...bookingForm, name: e.target.value})}
+                      className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-sm text-white" 
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-slate-400 font-semibold mb-1 block">Phone (for Room Key SMS)</label>
+                    <input 
+                      type="text" 
+                      required
+                      value={bookingForm.phone} 
+                      onChange={e => setBookingForm({...bookingForm, phone: e.target.value})}
+                      className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-sm text-white" 
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="text-xs text-slate-400 font-semibold mb-1 block">Check-in Date</label>
+                      <input 
+                        type="date" 
+                        required
+                        value={bookingForm.date} 
+                        onChange={e => setBookingForm({...bookingForm, date: e.target.value})}
+                        className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-sm text-white" 
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs text-slate-400 font-semibold mb-1 block">Nights</label>
+                      <input 
+                        type="number" 
+                        min="1" 
+                        max="14"
+                        value={bookingForm.nights} 
+                        onChange={e => setBookingForm({...bookingForm, nights: e.target.value})}
+                        className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-sm text-white" 
+                      />
+                    </div>
+                  </div>
+
+                  <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex justify-between items-center text-xs mt-4">
+                    <span className="text-slate-400">Total Price ({bookingForm.nights} nights):</span>
+                    <span className="text-base font-extrabold text-emerald-400 font-mono">
+                      ₹{(bookingModal.price_per_night * parseInt(bookingForm.nights || 1)).toLocaleString()}
+                    </span>
+                  </div>
+
+                  <button
+                    type="submit"
+                    className="w-full py-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold text-sm transition-all mt-4"
+                  >
+                    Confirm Pre-Verified Room Booking
+                  </button>
+                </form>
+              </div>
+            </div>
+          )}
+
+          {/* Booking Success Confirmation */}
+          {bookingSuccess && (
+            <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+              <div className="bg-slate-900 border border-emerald-500 rounded-2xl max-w-md w-full p-6 shadow-2xl text-center">
+                <div className="w-14 h-14 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center text-2xl mx-auto mb-4 border border-emerald-500/40">
+                  ✓
+                </div>
+                <h3 className="text-xl font-black text-white mb-1">Booking Confirmed!</h3>
+                <p className="text-xs text-slate-400 mb-4">{bookingSuccess.safety_assurance}</p>
+
+                <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 text-left space-y-2 text-xs mb-5">
+                  <div className="flex justify-between"><span className="text-slate-400">Booking ID:</span> <span className="font-mono font-bold text-white">{bookingSuccess.booking_id}</span></div>
+                  <div className="flex justify-between"><span className="text-slate-400">Property:</span> <span className="font-bold text-white">{bookingSuccess.hotel_name}</span></div>
+                  <div className="flex justify-between"><span className="text-slate-400">Room Allocated:</span> <span className="font-bold text-emerald-400 font-mono">{bookingSuccess.allocated_room_no}</span></div>
+                  <div className="flex justify-between"><span className="text-slate-400">Guest:</span> <span className="text-white">{bookingSuccess.guest_name}</span></div>
+                  <div className="flex justify-between"><span className="text-slate-400">Total Paid:</span> <span className="font-bold text-white">{bookingSuccess.total_amount}</span></div>
+                </div>
+
+                <button
+                  onClick={() => setBookingSuccess(null)}
+                  className="w-full py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs"
+                >
+                  Done
+                </button>
+              </div>
+            </div>
+          )}
+
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
